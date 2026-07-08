@@ -1,13 +1,20 @@
-# Claude Code Linux 最新版离线包下载与安装脚本
+# Claude Code 离线包下载与安装脚本
 
-这个项目用于在**有网 Linux 机器**上下载 Claude Code 最新版，然后生成可拷贝到**离线 Linux 机器**安装的 tar.gz 包。
+这个项目用于在**有网机器**上下载 Claude Code 最新版，然后生成可拷贝到**离线机器**安装的 tar.gz 包。
 
 默认走官方二进制发布通道，支持：
+
+**Linux**
 
 - `linux-x64`：普通 x86_64 glibc Linux，Ubuntu/Debian/openEuler/CentOS/RHEL 常用
 - `linux-arm64`：ARM64 glibc Linux
 - `linux-x64-musl`：x86_64 musl，例如 Alpine
 - `linux-arm64-musl`：ARM64 musl
+
+**Windows**
+
+- `win32-x64`：Windows x64
+- `win32-arm64`：Windows ARM64
 
 项目也附带一个可选的 `.deb` 下载脚本，适合 Debian/Ubuntu 体系。
 
@@ -35,6 +42,19 @@ dist/claude-code-offline-2.x.x-linux-x64.tar.gz.sha256
 ./scripts/download-latest.sh --channel latest --platform all
 ```
 
+下载 Windows 平台（在有网的 Linux/macOS 机器上打包，拷贝到离线 Windows 安装）：
+
+```bash
+./scripts/download-latest.sh --channel latest --platform win32-x64
+./scripts/download-latest.sh --channel latest --platform all-windows
+```
+
+或使用 Makefile：
+
+```bash
+make all-windows
+```
+
 固定版本：
 
 ```bash
@@ -49,7 +69,9 @@ dist/claude-code-offline-2.x.x-linux-x64.tar.gz.sha256
 
 ## 2. 离线机器：安装
 
-把 `dist/claude-code-offline-*.tar.gz` 拷贝到离线机器：
+### Linux
+
+把 `dist/claude-code-offline-*-linux-*.tar.gz` 拷贝到离线 Linux 机器：
 
 ```bash
 tar xzf claude-code-offline-*.tar.gz
@@ -76,6 +98,29 @@ claude --version
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
+```
+
+### Windows
+
+把 `dist/claude-code-offline-*-win32-*.tar.gz` 拷贝到离线 Windows 机器，解压后（Windows 10+ 自带 `tar`，或用 7-Zip）：
+
+```powershell
+tar -xzf claude-code-offline-*-win32-x64.tar.gz
+cd claude-code-offline-*-win32-x64
+
+# 可选：先校验包
+.\verify-package.ps1
+
+# 系统级安装（需管理员 PowerShell）
+.\install-offline.ps1
+claude --version
+```
+
+仅当前用户安装：
+
+```powershell
+.\install-offline.ps1 -User
+claude --version
 ```
 
 ## 3. 可选：下载 Debian/Ubuntu `.deb` 离线包
@@ -153,6 +198,8 @@ sudo apt install gpg curl ca-certificates
 
 ## 6. 卸载
 
+### Linux
+
 系统级安装卸载：
 
 ```bash
@@ -169,6 +216,14 @@ sudo ./uninstall.sh
 
 ```bash
 ./uninstall.sh --user --remove-user-data
+```
+
+### Windows
+
+```powershell
+.\uninstall.ps1
+# 或：.\uninstall.ps1 -User
+# 删除用户数据：.\uninstall.ps1 -User -RemoveUserData
 ```
 
 ## 7. 注意

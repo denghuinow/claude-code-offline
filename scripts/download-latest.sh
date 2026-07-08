@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Claude Code Linux 最新/指定版本离线包制作脚本
+# Claude Code 最新/指定版本离线包制作脚本（Linux / Windows）
 # 用法：
 #   ./scripts/download-latest.sh --channel latest --platform auto
 #   ./scripts/download-latest.sh --version 2.1.89 --platform linux-x64
 #   ./scripts/download-latest.sh --platform all
+#   ./scripts/download-latest.sh --platform win32-x64
+#   ./scripts/download-latest.sh --platform all-windows
 
 REPO_DEFAULT="https://downloads.claude.ai/claude-code-releases"
 GCS_REPO_DEFAULT="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
@@ -22,6 +24,7 @@ VERSION=""
 PLATFORM="auto"
 SKIP_GPG=0
 KEEP_WORK=0
+WORK_DIR=""
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -34,13 +37,14 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"; }
 
 usage() {
   cat <<USAGE
-Claude Code Linux 离线包制作脚本
+Claude Code 离线包制作脚本
 
 参数：
   --channel latest|stable      下载渠道，默认 latest
   --version X.Y.Z              固定版本；设置后不再解析 channel
-  --platform auto|all|linux-x64|linux-arm64|linux-x64-musl|linux-arm64-musl
-                              默认 auto，自动识别当前在线机器平台
+  --platform auto|all|all-windows|linux-x64|linux-arm64|linux-x64-musl|linux-arm64-musl|win32-x64|win32-arm64
+                              默认 auto，自动识别当前在线机器平台（Linux）
+                              all=全部 Linux；all-windows=全部 Windows
   --out DIR                    输出目录，默认 dist
   --no-gpg                     不校验 manifest 签名，仅校验 SHA256
   --keep-work                  保留临时工作目录，便于排错
@@ -50,6 +54,8 @@ Claude Code Linux 离线包制作脚本
   ./scripts/download-latest.sh --channel latest --platform auto
   ./scripts/download-latest.sh --channel stable --platform linux-x64
   ./scripts/download-latest.sh --version 2.1.89 --platform all
+  ./scripts/download-latest.sh --channel latest --platform win32-x64
+  ./scripts/download-latest.sh --channel latest --platform all-windows
 
 输出：
   dist/claude-code-offline-<version>-<platform>.tar.gz
@@ -72,7 +78,7 @@ done
 
 [[ "$CHANNEL" == "latest" || "$CHANNEL" == "stable" ]] || die "--channel 只能是 latest 或 stable"
 case "$PLATFORM" in
-  auto|all|linux-x64|linux-arm64|linux-x64-musl|linux-arm64-musl) ;;
+  auto|all|all-windows|linux-x64|linux-arm64|linux-x64-musl|linux-arm64-musl|win32-x64|win32-arm64) ;;
   *) die "不支持的平台：$PLATFORM" ;;
 esac
 
@@ -154,8 +160,30 @@ platforms_to_download() {
   case "$PLATFORM" in
     auto) detect_platform ;;
     all) printf '%s\n' linux-x64 linux-arm64 linux-x64-musl linux-arm64-musl ;;
+    all-windows) printf '%s\n' win32-x64 win32-arm64 ;;
     *) printf '%s\n' "$PLATFORM" ;;
   esac
+}
+
+is_windows_platform() {
+  [[ "$1" == win32-* ]]
+}
+
+json_binary_name() {
+  local manifest="$1" platform="$2"
+  python3 - "$manifest" "$platform" <<'PY'
+import json, sys
+manifest, platform = sys.argv[1], sys.argv[2]
+with open(manifest, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+item = data.get('platforms', {}).get(platform)
+if not item:
+    raise SystemExit(f'platform not found in manifest: {platform}')
+binary = item.get('binary')
+if not binary:
+    raise SystemExit(f'binary name not found for platform: {platform}')
+print(binary)
+PY
 }
 
 json_checksum() {
@@ -207,12 +235,18 @@ make_one_package() {
   local manifest="$work/manifest.json"
   local sig="$work/manifest.json.sig"
   local key="$work/claude-code.asc"
-  local binary="$work/$platform/claude"
-  local checksum_expected checksum_actual pkg_name pkg_dir archive
+  local binary_name binary checksum_expected checksum_actual pkg_name pkg_dir archive
 
-  log "下载 $platform 二进制。"
-  download_file "$REPO/$version/$platform/claude" "$binary"
-  chmod +x "$binary"
+  binary_name="$(json_binary_name "$manifest" "$platform")"
+  binary="$work/$platform/$binary_name"
+
+  log "下载 $platform 二进制（$binary_name）。"
+  download_file "$REPO/$version/$platform/$binary_name" "$binary"
+  if is_windows_platform "$platform"; then
+    chmod +x "$binary" 2>/dev/null || true
+  else
+    chmod +x "$binary"
+  fi
 
   checksum_expected="$(json_checksum "$manifest" "$platform")"
   checksum_actual="$(sha256sum "$binary" | awk '{print tolower($1)}')"
@@ -224,25 +258,64 @@ make_one_package() {
   rm -rf "$pkg_dir"
   mkdir -p "$pkg_dir/bin" "$pkg_dir/meta"
 
-  install -m 755 "$binary" "$pkg_dir/bin/claude"
+  install -m 755 "$binary" "$pkg_dir/bin/$binary_name"
   cp "$manifest" "$pkg_dir/meta/manifest.json"
   [[ -s "$sig" ]] && cp "$sig" "$pkg_dir/meta/manifest.json.sig" || true
   cp "$key" "$pkg_dir/meta/claude-code.asc"
-  cp "$PROJECT_ROOT/scripts/install-offline.sh" "$pkg_dir/install-offline.sh"
-  cp "$PROJECT_ROOT/scripts/verify-package.sh" "$pkg_dir/verify-package.sh"
-  cp "$PROJECT_ROOT/scripts/uninstall.sh" "$pkg_dir/uninstall.sh"
-  chmod +x "$pkg_dir"/*.sh
 
-  cat > "$pkg_dir/meta/checksums.txt" <<CHECKSUMS
-$checksum_actual  bin/claude
-CHECKSUMS
-  cat > "$pkg_dir/VERSION" <<VERSIONFILE
-$version
-VERSIONFILE
-  cat > "$pkg_dir/PLATFORM" <<PLATFORMFILE
-$platform
-PLATFORMFILE
-  cat > "$pkg_dir/README-OFFLINE.md" <<README
+  if is_windows_platform "$platform"; then
+    cp "$PROJECT_ROOT/scripts/install-offline.ps1" "$pkg_dir/install-offline.ps1"
+    cp "$PROJECT_ROOT/scripts/verify-package.ps1" "$pkg_dir/verify-package.ps1"
+    cp "$PROJECT_ROOT/scripts/uninstall.ps1" "$pkg_dir/uninstall.ps1"
+    cat > "$pkg_dir/README-OFFLINE.md" <<README
+# Claude Code 离线安装包
+
+版本：$version
+平台：$platform
+
+## 离线安装
+
+以管理员身份打开 PowerShell，进入解压目录后执行：
+
+\`\`\`powershell
+.\verify-package.ps1
+.\install-offline.ps1
+claude --version
+\`\`\`
+
+仅当前用户安装（无需管理员）：
+
+\`\`\`powershell
+.\install-offline.ps1 -User
+claude --version
+\`\`\`
+
+默认安装路径：
+
+- 系统级：\`C:\Program Files\Claude Code\bin\claude.exe\`
+- 用户级：\`%LOCALAPPDATA%\Programs\claude-code\bin\claude.exe\`
+
+## 安装前校验
+
+\`\`\`powershell
+.\verify-package.ps1
+\`\`\`
+
+## 卸载
+
+\`\`\`powershell
+.\uninstall.ps1
+# 或：.\uninstall.ps1 -User
+\`\`\`
+
+说明：离线安装只解决安装包分发问题；首次使用仍需要可访问 Claude 服务并完成登录或配置企业/API 认证。
+README
+  else
+    cp "$PROJECT_ROOT/scripts/install-offline.sh" "$pkg_dir/install-offline.sh"
+    cp "$PROJECT_ROOT/scripts/verify-package.sh" "$pkg_dir/verify-package.sh"
+    cp "$PROJECT_ROOT/scripts/uninstall.sh" "$pkg_dir/uninstall.sh"
+    chmod +x "$pkg_dir"/*.sh
+    cat > "$pkg_dir/README-OFFLINE.md" <<README
 # Claude Code 离线安装包
 
 版本：$version
@@ -279,6 +352,17 @@ sudo ./uninstall.sh
 
 说明：离线安装只解决安装包分发问题；首次使用仍需要可访问 Claude 服务并完成登录或配置企业/API 认证。
 README
+  fi
+
+  cat > "$pkg_dir/meta/checksums.txt" <<CHECKSUMS
+$checksum_actual  bin/$binary_name
+CHECKSUMS
+  cat > "$pkg_dir/VERSION" <<VERSIONFILE
+$version
+VERSIONFILE
+  cat > "$pkg_dir/PLATFORM" <<PLATFORMFILE
+$platform
+PLATFORMFILE
 
   archive="$out_dir/$pkg_name.tar.gz"
   tar -C "$out_dir" -czf "$archive" "$pkg_name"
@@ -287,34 +371,34 @@ README
 }
 
 main() {
-  local version work abs_out manifest sig key
+  local version abs_out manifest sig key
   version="$(resolve_version)" || die "无法解析 Claude Code $CHANNEL 最新版本；可用 --version 手动指定。"
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "解析到的版本号异常：$version"
   log "目标版本：$version"
 
   mkdir -p "$OUT_DIR"
   abs_out="$(cd "$OUT_DIR" && pwd)"
-  work="$(mktemp -d)"
+  WORK_DIR="$(mktemp -d)"
   if [[ "$KEEP_WORK" -eq 0 ]]; then
-    trap 'rm -rf "$work"' EXIT
+    trap 'rm -rf "$WORK_DIR"' EXIT
   else
-    warn "保留临时目录：$work"
+    warn "保留临时目录：$WORK_DIR"
   fi
 
-  manifest="$work/manifest.json"
-  sig="$work/manifest.json.sig"
-  key="$work/claude-code.asc"
+  manifest="$WORK_DIR/manifest.json"
+  sig="$WORK_DIR/manifest.json.sig"
+  key="$WORK_DIR/claude-code.asc"
 
   log "下载 manifest、签名和公钥。"
   download_file "$REPO/$version/manifest.json" "$manifest"
   download_file "$REPO/$version/manifest.json.sig" "$sig" || warn "manifest.json.sig 下载失败，可能是旧版本或临时网络问题。"
   download_file "$KEY_URL" "$key"
 
-  verify_manifest_signature "$work" "$manifest" "$sig" "$key"
+  verify_manifest_signature "$WORK_DIR" "$manifest" "$sig" "$key"
 
   while IFS= read -r p; do
     [[ -n "$p" ]] || continue
-    make_one_package "$version" "$p" "$work" "$abs_out"
+    make_one_package "$version" "$p" "$WORK_DIR" "$abs_out"
   done < <(platforms_to_download)
 
   log "完成。输出目录：$abs_out"
